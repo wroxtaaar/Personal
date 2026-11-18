@@ -1,0 +1,89 @@
+import json
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query
+
+from catalogues import nuvio_streams, torrent_options
+from catalogues.section_curation import apply_curation
+from core.settings import MAX_SEARCH_RESULT_SIZE_BYTES, MIN_SEARCH_RESULT_SIZE_BYTES, NUVIO_API_URL, NUVIO_URL
+
+router = APIRouter()
+SECTION_CACHE_NAMES = frozenset({
+    "hollywood", "bollywood", "marvel", "dc", "highest-rated",
+    "korean", "pakistani", "anime", "favourites",
+})
+SECTION_CACHE_DIR = Path(__file__).resolve().parents[1] / "cache-seed"
+
+
+@router.get("/api/sections/{section}")
+async def api_get_section_cache(section: str) -> dict[str, Any]:
+    if section not in SECTION_CACHE_NAMES:
+        raise HTTPException(status_code=404, detail="Section cache not found")
+    path = SECTION_CACHE_DIR / f"{section}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Section cache is not installed") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="Section cache could not be read") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("section") != section
+        or payload.get("metadataSelfContained") is not True
+        or not isinstance(payload.get("subsections"), dict)
+    ):
+        raise HTTPException(status_code=500, detail="Section cache has an invalid document shape")
+    # The data bundle fetched at start overwrites these files, so hand edits live in section_curation.py.
+    return apply_curation(section, payload)
+
+
+@router.get("/api/sections/{section}/torrent-options")
+async def api_get_torrent_options(
+    section: str,
+    tmdb_id: str | None = Query(None, pattern=r"^\d{1,12}$"),
+    title: str | None = Query(None, min_length=1, max_length=200),
+    year: str = Query("", max_length=4),
+    media: str = Query("movie", pattern=r"^(movie|tv)$"),
+    large: bool = Query(False, description="Movies only: the releases ABOVE the size limit (for Webtor)"),
+    q: str | None = Query(None, min_length=2, max_length=120, description="section=all, movies: every saved release of titles matching these words"),
+) -> dict[str, Any]:
+    """Releases for ONE movie (or, with ``media=tv``, one series' season packs) from the ``<section>-torrents.json`` files (Prepare click only).
+
+    ``section`` is one of the nine section names, or ``all`` to search every file. The
+    response mirrors /api/regional-movies/prebuilt so the Prepare card reads either one.
+    Never reached by page loads or pagination: those only use /api/sections/{section}.
+    """
+    if section != "all" and section not in SECTION_CACHE_NAMES:
+        raise HTTPException(status_code=404, detail="Section cache not found")
+    if q and section == "all" and media == "movie" and not tmdb_id:
+        found = torrent_options.search_cached(q, min_size=MIN_SEARCH_RESULT_SIZE_BYTES, max_size=MAX_SEARCH_RESULT_SIZE_BYTES)
+        if not found:
+            return {"status": "not_cached", "section": section, "torrentDetails": None}
+        return {"status": "ready", "section": section, "torrentDetails": {"results": found}}
+    if not tmdb_id and not (title and year):
+        raise HTTPException(status_code=422, detail="Provide tmdb_id, or both title and year")
+    rows = torrent_options.lookup(
+        None if section == "all" else (section,),
+        tmdb_id=tmdb_id,
+        title=title,
+        year=year,
+        media=media,
+        min_size=MIN_SEARCH_RESULT_SIZE_BYTES,
+        max_size=MAX_SEARCH_RESULT_SIZE_BYTES,
+        only_large=large and media == "movie",
+    )
+    if not rows:
+        return {"status": "not_cached", "section": section, "torrentDetails": None}
+    return {"status": "ready", "section": section, "torrentDetails": {"results": rows}}
+
+
+@router.get("/api/nuvio/streams")
+async def api_get_nuvio_streams(tmdb_id: str = Query(..., pattern=r"^\d{1,12}$")) -> dict[str, Any]:
+    """HD download options for ONE movie from the Nuvio Streams add-on (called when a movie card opens).
+
+    ``status`` is ``unavailable`` when neither NUVIO_URL (add-on on this machine) nor NUVIO_API_URL (another Torrent Studio
+    that has one) is set, or nothing came back, so the card shows no button.
+    """
+    options = await (nuvio_streams.lookup(NUVIO_URL, tmdb_id) if NUVIO_URL else nuvio_streams.remote_lookup(NUVIO_API_URL, tmdb_id))
+    return {"status": "ready" if options else "unavailable", "options": options}

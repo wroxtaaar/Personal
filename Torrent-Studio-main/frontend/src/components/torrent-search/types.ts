@@ -1,0 +1,23 @@
+export type NexStreamTitle = { id: number; title: string; date: string; overview: string; poster: string | null; type: 'movie' | 'tv'; anime?: boolean };
+
+export type FranchiseTmdbKey = 'marvel' | 'dc-live-action' | 'dc-animated';
+
+export type CachedFranchiseKey = 'marvel' | 'dc-live-action';
+
+export type MainCatalogueMenu = 'dc' | 'bollywood' | 'hollywood';
+
+export type ActiveTopSection = 'marvel' | 'dc' | 'hollywood' | 'bollywood' | 'korean' | 'pakistani' | 'anime' | 'classics' | 'highest-rated' | null;
+
+export type RegionalContentTab = 'movies' | 'web-series' | null;
+
+export type ClassicsContentTab = 'movies' | 'web-series' | 'anime';
+
+export type RegionalCatalogueGroup = 'bollywood' | 'hollywood' | 'korean' | 'pakistani' | 'anime';
+
+export type RegionalCatalogueMode = 'popular' | 'trending' | 'latest';
+
+export type RegionalTvGroup = 'indian' | 'hollywood' | 'korean' | 'pakistani' | 'anime' | 'highest-rated';
+
+export type RegionalTvMode = 'popular' | 'trending' | 'latest';
+
+export type MarvelFilmFilter = 'all' | 'mcu' | 'x-men' | 'sony';

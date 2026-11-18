@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""Add season-pack / complete-series torrents for TV and web series to the per-section files.
+
+The nine ``backend/cache-seed/<section>-torrents.json`` files hold movie torrents (built by
+migrate_torrent_cache.py). This script adds ``"tv:<tmdbId>"`` entries to the same files so
+the series card can offer "Webtor": the user picks a season or the complete series, the
+magnet is copied, and Webtor opens. Nothing here runs in the app; it is an offline build step
+(it needs network access, so run it on the VPS):
+
+    cd /path/to/Torrent-Studio
+    python3 -I scripts/build_tv_torrent_cache.py --section hollywood --limit 5 --dry-run --debug   # look first
+    python3 -I scripts/build_tv_torrent_cache.py                                          # all nine sections
+
+It is resumable: titles that already have a ``tv:`` entry are skipped unless --refresh is given,
+and each section file is rewritten atomically after every section. Movie entries are never touched.
+
+Entry shape (same release fields as movies, plus the season scope):
+
+    "tv:108978": {"title": "Reacher", "year": 2022, "releases": [
+        {"infoHash": "...", "title": "Reacher S01 1080p ...", "size": ..., "seeders": ..., "leechers": ...,
+         "indexer": "...", "infoUrl": "...", "scope": "season",   "season": 1},
+        {"infoHash": "...", "title": "Reacher Complete Series ...", ..., "scope": "complete"}]}
+
+Single episodes are dropped; only season packs and complete-series packs are kept, with no size
+window (season packs are large - that is why they go to Webtor).
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import re
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import torrent_misses  # noqa: E402
+SEED_DIR = ROOT / "backend" / "cache-seed"
+EXCLUDE_FILE = ROOT / "scripts" / "tv_torrent_exclude.json"
+SECTIONS = ("hollywood", "bollywood", "marvel", "dc", "highest-rated", "korean", "pakistani", "anime", "favourites")
+PER_BUCKET = 4        # releases kept per season (or for "complete"): one per resolution first, then the best seeded
+MAX_PER_SHOW = 40     # must stay <= torrent_options.MAX_TV_RESULTS
+HEX40 = re.compile(r"^[0-9a-f]{40}$")
+
+EPISODE = re.compile(r"(?:\bs\d{1,2}[ ._-]?e\d{1,3}\b|\b\d{1,2}x\d{2,3}\b|\bepisode[ ._-]?\d+\b|\be\d{2,3}\b)", re.IGNORECASE)
+SEASON = re.compile(r"(?:\bs(?:eason)?[ ._-]?0*(\d{1,2})\b)", re.IGNORECASE)
+MULTI_SEASON = re.compile(
+    r"(?:\bs0*\d{1,2}[ ._-]?(?:-|to|&|\+)[ ._-]?s?0*\d{1,2}\b|\bseasons?[ ._-]?0*\d{1,2}[ ._-]?(?:-|to|&|\+)[ ._-]?0*\d{1,2}\b)",
+    re.IGNORECASE,
+)
+SEASON_TOKEN = re.compile(r"\bs0*(\d{1,2})\b", re.IGNORECASE)
+RESOLUTION = re.compile(r"\b(2160p|1440p|1080p|720p|576p|480p|4k|8k)\b", re.IGNORECASE)
+COMPLETE = re.compile(r"\b(?:complete|full[ ._-]?series|all[ ._-]?seasons|the[ ._-]?complete)\b", re.IGNORECASE)
+BAD_QUALITY = re.compile(r"\b(?:cam|hdcam|telesync|telecine|screener|workprint)\b", re.IGNORECASE)
+
+
+def normalize_title(value: object) -> str:
+    text = str(value or "").lower().replace("&", " and ")
+    text = re.sub(r"[’']", "", text)
+    text = re.sub(r"[._]+", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"^(?:the|a|an)\s+", "", text)
+
+
+def year_of(value: object) -> str:
+    match = re.match(r"^((?:18|19|20)\d{2})", str(value or "").strip())
+    return match.group(1) if match else ""
+
+
+# What may follow the show's name in a pack's release name. Anything else (a word like "and", "the", "vs")
+# means the release is a LONGER title, e.g. "Wolverine and the X-Men" is not a pack of "Wolverine".
+BOUNDARY = re.compile(
+    r"^(?:s\d{1,2}|seasons?|complete|full|series|collection|pack|(?:19|20)\d{2}|\d{3,4}p|4k|8k|uhd|us|uk|web|webrip|dl|rip|"
+    r"bluray|bdrip|brrip|hdtv|dvdrip|x264|x265|h264|h265|hevc|amzn|dsnp|nf|hmax|atvp|hdr|dv|multi|dual|hindi|english|eng)$"
+)
+
+
+YEAR_TOKEN = re.compile(r"^(?:19|20)\d{2}$")
+
+
+def names_the_show(release_title: str, show_title: str, year: int | str | None = None, require_year: bool = False) -> bool:
+    """The show's name appears as a whole phrase and is followed by a season/year/quality marker (or the end).
+
+    Year handling (many shows share a name, e.g. The Flash 1990 / 2014):
+      * a year written right after the name must be the show's first-air year (+/- 1), otherwise it is another show;
+      * with ``require_year`` (an OLDER show whose name a newer show also uses) a release with no year is not accepted,
+        because a bare "The Flash S01" almost always means the newer one.
+    A year later in the name (after the season, "Reacher S02 2023") describes the season and is ignored.
+    """
+    show, tokens = normalize_title(show_title).split(), normalize_title(release_title).split()
+    if not show:
+        return False
+    wanted = int(year) if str(year or "").isdigit() else None
+    for start in range(len(tokens) - len(show) + 1):
+        if tokens[start:start + len(show)] != show:
+            continue
+        end = start + len(show)
+        if end < len(tokens) and not BOUNDARY.match(tokens[end]):
+            continue
+        written = int(tokens[end]) if end < len(tokens) and YEAR_TOKEN.match(tokens[end]) else None
+        if written is not None and wanted is not None:
+            if abs(written - wanted) <= 1:
+                return True
+            continue
+        if written is None and require_year and wanted is not None:
+            continue
+        return True
+    return False
+
+
+def classify(release_title: str, show_title: str, year: int | str | None = None, require_year: bool = False) -> tuple[str, int] | None:
+    """('complete', 0) / ('season', N) for a season or complete-series pack of this show, else None."""
+    title = str(release_title or "")
+    if not names_the_show(title, show_title, year, require_year):
+        return None
+    if BAD_QUALITY.search(title) or EPISODE.search(title):
+        return None
+    if MULTI_SEASON.search(title) or len({int(n) for n in SEASON_TOKEN.findall(title)}) >= 2:
+        return ("complete", 0)
+    # "Show.S01.COMPLETE" is a complete SEASON 1, not the complete series: a season number wins over the word.
+    match = SEASON.search(title)
+    if match and 0 < int(match.group(1)) < 100:
+        return ("season", int(match.group(1)))
+    if COMPLETE.search(title):
+        return ("complete", 0)
+    return None
+
+
+def older_namesakes(rows: list[dict]) -> set[str]:
+    """"tv:<id>" of every series that has a NEWER series with the same name (years more than a year apart).
+
+    Those need the year in a release's name: a bare "The Flash S01" is taken to be the newest "The Flash"."""
+    by_name: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for row in rows:
+        year = year_of(row.get("year") or row.get("releaseDate"))
+        if year:
+            by_name[normalize_title(row.get("title"))].append((int(year), f"tv:{row.get('tmdbId') or row.get('id')}"))
+    older: set[str] = set()
+    for entries in by_name.values():
+        newest = max(year for year, _ in entries)
+        older.update(key for year, key in entries if newest - year > 1)
+    return older
+
+
+def resolution_of(title: str) -> str:
+    match = RESOLUTION.search(title or "")
+    value = match.group(1).lower() if match else "other"
+    return {"4k": "2160p", "8k": "2160p", "1440p": "1080p", "576p": "480p"}.get(value, value)
+
+
+HINDI = re.compile(r"(?:^|[^a-z0-9])(?:hindi|hin)(?:$|[^a-z0-9])", re.IGNORECASE)
+
+
+def select_releases(candidates: list[dict], show_title: str, per_bucket: int = PER_BUCKET, cap: int = MAX_PER_SHOW,
+                    year: int | str | None = None, require_year: bool = False) -> list[dict]:
+    """Per season (and per 'complete'): the best-seeded pack of each resolution, then the next best
+    seeded up to ``per_bucket``. Distinct by info hash, capped per show.
+
+    Picking by resolution first matters: the top three by seeders can all be 720p, which would hide the 1080p and 4K
+    packs a user picking a quality on the card is looking for.
+    """
+    buckets: dict[tuple[str, int], list[dict]] = defaultdict(list)
+    seen: set[str] = set()
+    for item in sorted(candidates, key=lambda c: (not HINDI.search(str(c.get("title") or "")), -int(c.get("seeders") or 0), -int(c.get("leechers") or 0))):
+        digest = str(item.get("infoHash") or "").lower()
+        if not HEX40.match(digest) or digest in seen:
+            continue
+        scope = classify(item.get("title"), show_title, year, require_year)
+        if scope is None:
+            continue
+        seen.add(digest)
+        buckets[scope].append({**item, "infoHash": digest, "scope": scope[0], "season": scope[1]})
+    ordered = sorted(buckets, key=lambda scope: (scope[0] != "complete", scope[1]))
+    out: list[dict] = []
+    for scope in ordered:
+        rows = buckets[scope]          # already best-seeded first
+        first_per_resolution: dict[str, dict] = {}
+        for row in rows:
+            first_per_resolution.setdefault(resolution_of(row["title"]), row)
+        picked = list(first_per_resolution.values())[:per_bucket]
+        picked += [row for row in rows if row not in picked][: max(0, per_bucket - len(picked))]
+        out.extend(sorted(picked, key=lambda row: (not HINDI.search(str(row.get("title") or "")), -int(row.get("seeders") or 0), row["infoHash"])))
+    return out[:cap]
+
+
+def entry_for(show: dict, releases: list[dict]) -> dict:
+    keep = ("infoHash", "title", "size", "seeders", "leechers", "indexer", "infoUrl", "scope", "season")
+    return {
+        "title": str(show.get("title") or ""),
+        "year": int(year_of(show.get("year") or show.get("releaseDate")) or 0) or None,
+        "releases": [{k: r[k] for k in keep if r.get(k) not in ("", None) and not (k == "season" and r.get("scope") == "complete")}
+                     for r in releases],
+    }
+
+
+def tv_rows(section_document: dict, skip_anime: bool = False) -> list[dict]:
+    rows: dict[str, dict] = {}
+    for key, subsection in (section_document.get("subsections") or {}).items():
+        if not isinstance(subsection, dict) or not (subsection.get("mediaType") == "tv" or str(key).startswith("tv-")):
+            continue
+        if skip_anime and key == "anime":
+            continue
+        for row in subsection.get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            tmdb = str(row.get("tmdbId") or row.get("id") or "").strip()
+            if tmdb.isdigit() and row.get("title"):
+                rows.setdefault(tmdb, row)
+    return list(rows.values())
+
+
+def all_tv_rows(seed_dir: Path) -> list[dict]:
+    """Every series row of the nine section files (a series in several sections appears once per section)."""
+    rows: list[dict] = []
+    for section in SECTIONS:
+        path = seed_dir / f"{section}.json"
+        if path.is_file():
+            rows.extend(tv_rows(json.loads(path.read_text(encoding="utf-8"))))
+    return rows
+
+
+def load_excluded(path: Path = EXCLUDE_FILE) -> set[str]:
+    """TMDB ids of series that get no torrent entry (scripts/tv_torrent_exclude.json), as "tv:<id>" keys."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {f"tv:{tmdb}" for tmdb in (document.get("tmdbIds") or {})}
+
+
+def merge_section(existing: dict, found: dict[str, dict], section: str, built_at: str, replace_keys: set[str] | frozenset = frozenset()) -> dict:
+    """Return the section document with ``found`` tv entries merged in; movie entries are untouched.
+
+    ``replace_keys`` are the series that were (re-)searched this run: their old entry is dropped first, so a
+    series that now has no valid pack does not keep a stale one from an earlier, looser run."""
+    document = dict(existing) if existing else {
+        "schemaVersion": 2, "kind": "torrent-options", "section": section, "limits": {}, "trackers": [], "titles": {},
+    }
+    titles = {k: v for k, v in (document.get("titles") or {}).items() if k not in replace_keys}
+    titles.update(found)
+    trackers = list(document.get("trackers") or [])
+    document.update({"builtAt": built_at, "titles": dict(sorted(titles.items())), "trackers": trackers})
+    return document
+
+
+def write_atomic(path: Path, document: dict) -> int:
+    text = json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return len(text.encode())
+
+
+# --------------------------------------------------------------------------- discovery
+MAX_SEASONS = 15
+Searcher = "Callable[[str], Awaitable[list[dict]]]"
+
+
+async def discover(title: str, searcher, max_seasons: int = MAX_SEASONS, log=None,
+                   year: int | str | None = None, require_year: bool = False) -> list[dict]:
+    """Find packs for one show with targeted queries, so a long-running show's early seasons are
+    not buried under thousands of episode torrents.
+
+    ``searcher(query)`` returns raw release rows for a query string. Queries, in order:
+      "<title> complete"                       the complete-series pack(s)
+      "<title> S01", "<title> S02", ...        one query per season (a token match, so S01E05 episodes
+                                               are not returned), falling back to "<title> Season N"
+    It stops after two seasons in a row with no pack, so it adapts to the show's length.
+    """
+    seen: list[dict] = []
+    strays: list[dict] = []           # single seasons returned by the "<title> complete" search
+    best_season = 0
+    log = log or (lambda *_: None)
+
+    # An older show whose name a newer one also uses is searched together with its year, so the 150 results
+    # are not mostly the newer show's releases.
+    name = f"{title} {year_of(year)}" if require_year and year_of(year) else title
+
+    async def ask(query: str, wanted) -> int:
+        rows = await searcher(query)
+        hits = [r for r in rows if classify(r.get("title"), title, year, require_year) == wanted]
+        log(query, len(rows), len(hits), [f"[{r.get('indexer') or '?'}] {r.get('title')}" for r in rows if r not in hits and not EPISODE.search(str(r.get("title") or ""))][:8])
+        # Keep only what this query was asking for. A "<title> complete" search also returns single
+        # seasons of unrelated shows and stray seasons ("S07"), which must not become entries.
+        scopes = [(r, classify(r.get("title"), title, year, require_year)) for r in rows]
+        seen.extend(r for r, scope in scopes if scope in {wanted, ("complete", 0)})
+        if wanted == ("complete", 0):
+            strays.extend(r for r, scope in scopes if scope and scope[0] == "season")
+        return len(hits)
+
+    await ask(f"{name} complete", ("complete", 0))
+    misses = 0
+    for number in range(1, max_seasons + 1):
+        wanted = ("season", number)
+        found = await ask(f"{name} S{number:02d}", wanted) or await ask(f"{name} Season {number}", wanted)
+        misses = 0 if found else misses + 1
+        best_season = number if found else best_season
+        if misses >= 2:
+            break
+    # A season the per-season queries missed (Agents of S.H.I.E.L.D. S06) is still valid when it lies inside the range
+    # they found; one beyond it (a stray "S07" for a 3-season show) is dropped.
+    seen.extend(r for r in strays if classify(r.get("title"), title, year, require_year)[1] <= best_season)
+    return seen
+
+
+# --------------------------------------------------------------------------- live search (VPS only)
+def make_searcher(delay: float, source: str = "all"):
+    """A searcher backed by the app's own providers (needs the backend's dependencies and network)."""
+    sys.path.insert(0, str(ROOT / "backend"))
+    from core.shared import _MANUAL_TORRENT_SEARCH            # noqa: PLC0415 (backend only)
+    from search import search_providers as providers          # noqa: PLC0415
+
+    _MANUAL_TORRENT_SEARCH.set(True)
+    providers._SIZE_WINDOW_DISABLED.set(True)                  # season packs are far above the movie size window
+
+    import os, urllib.parse, urllib.request                     # noqa: PLC0415,E401
+    api = os.getenv("HOME_API_BASE", "http://127.0.0.1:3000").rstrip("/")
+    btih = re.compile(r"btih:([0-9a-fA-F]{40})")
+
+    def app_search(query: str) -> list[dict]:
+        """The app's own search (1337x and the other providers), no size window. Empty when the app is not running."""
+        url = f"{api}/api/search?q={urllib.parse.quote(query)}&limit=50&any_size=true&source={source}&also_hindi=false"  # these series are already Hindi
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "TvPackScan/1.0"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            print(f"    app search failed for {query!r}: {exc}", file=sys.stderr)
+            return []
+        return data if isinstance(data, list) else data.get("results", data.get("torrents", []))
+
+    def app_resolve(info_url: str) -> str:
+        """1337x lists a release without its hash; the app reads it from the detail page."""
+        try:
+            req = urllib.request.Request(f"{api}/api/search/resolve-magnet", data=json.dumps({"infoUrl": info_url}).encode(),
+                                         headers={"Content-Type": "application/json", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                value = str(json.loads(resp.read().decode("utf-8")).get("infoHash") or "").strip().lower()
+            return value if HEX40.match(value) else ""
+        except Exception:
+            return ""
+
+    plain_cache: dict[str, list[dict]] = {}
+
+    async def from_app(query: str) -> list[dict]:
+        out: list[dict] = []
+        resolved = 0
+        for row in await asyncio.to_thread(app_search, query):
+            title = str(row.get("title") or "")
+            found = btih.search(str(row.get("magnetUrl") or ""))
+            digest = str(row.get("infoHash") or row.get("hash") or "").strip().lower() or (found.group(1).lower() if found else "")
+            detail = str(row.get("infoUrl") or row.get("sourceUrl") or "")
+            packish = (SEASON.search(title) or COMPLETE.search(title)) and not EPISODE.search(title)
+            if not HEX40.match(digest) and detail.startswith("https://") and packish and resolved < 5:
+                resolved += 1
+                digest = await asyncio.to_thread(app_resolve, detail)
+                await asyncio.sleep(0.4)
+            if not HEX40.match(digest):
+                continue
+            try:
+                size = int(row.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            out.append({"title": title, "infoHash": digest, "size": size, "seeders": int(row.get("seeders") or 0),
+                        "leechers": int(row.get("leechers") or 0), "indexer": str(row.get("indexer") or row.get("source") or ""),
+                        "infoUrl": detail})
+        return out
+
+    async def searcher(query: str) -> list[dict]:
+        rows: list[dict] = []
+        if source == "prowlarr":   # second pass: only the plain title, once per show, through Prowlarr
+            base = re.sub(r"\s+(?:complete|s\d{1,2}|season\s+\d+)$", "", query, flags=re.IGNORECASE).strip()
+            if base not in plain_cache:
+                plain_cache[base] = await from_app(base)
+                await asyncio.sleep(max(delay, 2.0))
+            return list(plain_cache[base])
+        try:
+            # provider_query = the exact text sent to Knaben, so "Reacher S02" is a token match for season packs
+            rows.extend(await providers.search_knaben(query, 150, provider_query=query))
+        except Exception as exc:                               # a provider hiccup must not stop the run
+            print(f"    knaben failed for {query!r}: {exc}", file=sys.stderr)
+        rows.extend(await from_app(query))                      # 1337x etc. through the running app
+        # The app treats "<title> S01" as an episode search, which hides season packs. The plain title lists them all
+        # (that is what 1337x itself shows), so search it once per show and let the pack classifier sort them.
+        base = re.sub(r"\s+(?:complete|s\d{1,2}|season\s+\d+)$", "", query, flags=re.IGNORECASE).strip()
+        if base not in plain_cache:
+            plain_cache[base] = await from_app(base)
+        rows.extend(plain_cache[base])
+        if query.endswith(" complete"):
+            try:
+                rows.extend((await providers.search_apibay(query, 100)).get("results", []))
+            except Exception as exc:
+                print(f"    apibay failed for {query!r}: {exc}", file=sys.stderr)
+        await asyncio.sleep(delay)
+        return rows
+
+    return searcher
+
+
+async def run(args: argparse.Namespace) -> int:
+    built_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    totals: Counter = Counter()
+    searcher = make_searcher(args.delay, args.source)
+    misses = torrent_misses.load()
+    record_misses = args.source in ("prowlarr", "all") and not args.dry_run
+    gate = asyncio.Semaphore(max(1, args.workers))
+    for section in args.section or SECTIONS:
+        metadata_path = args.seed_dir / f"{section}.json"
+        target = args.seed_dir / f"{section}-torrents.json"
+        if not metadata_path.is_file() or not target.is_file():
+            print(f"  {section}: missing metadata or torrent file", file=sys.stderr)
+            return 1
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        rows = [] if section == "anime" else tv_rows(json.loads(metadata_path.read_text(encoding="utf-8")), skip_anime=True)  # anime is not scanned
+        excluded = load_excluded()
+        older = older_namesakes(all_tv_rows(args.seed_dir))
+        rows = [r for r in rows if f"tv:{str(r.get('tmdbId') or r.get('id'))}" not in excluded]
+        todo = [r for r in rows if args.refresh or f"tv:{str(r.get('tmdbId') or r.get('id'))}" not in existing.get("titles", {})]
+        if args.add_hindi:   # every scanned series is Indian and already Hindi, so there is nothing to add
+            print(f"  {section}: --add-hindi does not apply (these series are already Hindi)")
+            continue
+        if args.add_hindi:   # series that have packs (or none) but no Hindi pack yet; their saved packs are kept
+            todo = [r for r in rows if not any(HINDI.search(str(x.get("title") or "")) for x in
+                    (existing.get("titles", {}).get(f"tv:{str(r.get('tmdbId') or r.get('id'))}") or {}).get("releases", []))]
+        if args.title:   # try one series (or a few): matched by part of the name, searched even if it already has an entry
+            wanted = args.title.casefold()
+            todo = [r for r in rows if wanted in str(r.get("title") or "").casefold()]
+        miss_prefix = "hindi:" if args.add_hindi else ""
+        if not args.ignore_rest and not args.title:
+            rest = [r for r in todo if torrent_misses.resting(misses, miss_prefix + f"tv:{str(r.get('tmdbId') or r.get('id'))}")]
+            todo = [r for r in todo if r not in rest]
+            if rest:
+                print(f"  {section}: {len(rest)} series resting (nobody had them in the last {torrent_misses.DAYS} days)")
+        if args.limit:
+            todo = todo[: args.limit]
+        found: dict[str, dict] = {}
+
+        async def one(index: int, show: dict) -> None:
+            async with gate:
+                lines: list[str] = []
+                log = (lambda query, raw, hits, others: lines.append(
+                    f"      {query!r}: {raw} results, {hits} packs" + (f"; e.g. {others}" if args.debug and others else ""))) \
+                    if args.debug else None
+                year = year_of(show.get("year") or show.get("releaseDate"))
+                require_year = f"tv:{show.get('tmdbId') or show.get('id')}" in older
+                candidates = await discover(str(show["title"]), searcher, log=log, year=year, require_year=require_year)
+                chosen = select_releases(candidates, str(show["title"]), year=year, require_year=require_year)
+                seasons = sorted({r["season"] for r in chosen if r["scope"] == "season"})
+                print(f"  {section} {index}/{len(todo)} {show['title']!r} ({year}{', older namesake: year required' if require_year else ''}): {len(chosen)} packs"
+                      + (f" (complete: {any(r['scope'] == 'complete' for r in chosen)}, seasons: {seasons})" if chosen else ""))
+                for line in lines:
+                    print(line)
+                if args.add_hindi:
+                    chosen = [r for r in chosen if HINDI.search(str(r.get("title") or ""))]
+                if chosen:
+                    found[f"tv:{show.get('tmdbId') or show.get('id')}"] = entry_for(show, chosen)
+
+        await asyncio.gather(*(one(i, show) for i, show in enumerate(todo, 1)))
+        if args.add_hindi:   # keep what was saved, put the Hindi packs first
+            for key, entry in found.items():
+                old = (existing.get("titles", {}).get(key) or {}).get("releases", [])
+                have = {r["infoHash"] for r in entry["releases"]}
+                entry["releases"] += [r for r in old if r.get("infoHash") not in have]
+        if record_misses:
+            for show in todo:
+                key = f"tv:{show.get('tmdbId') or show.get('id')}"
+                torrent_misses.record(miss_prefix + key, key in found, misses)
+            torrent_misses.save(misses)
+        totals.update(shows=len(rows), searched=len(todo), withPacks=len(found))
+        stale_excluded = excluded & set(existing.get("titles", {}))
+        if stale_excluded:
+            print(f"  {section}: removing {len(stale_excluded)} excluded series from the file")
+        if not args.dry_run and (found or args.refresh or stale_excluded):
+            size = write_atomic(target, merge_section(
+                existing, found, section, built_at,
+                ({f"tv:{show.get('tmdbId') or show.get('id')}" for show in todo} if not args.add_hindi else set(found)) | excluded))
+            print(f"  {section}: wrote {len(found)} series, file now {size / 1024:.1f} KiB")
+    print(f"total: {totals['withPacks']}/{totals['searched']} searched series have packs"
+          f"{' (dry run, nothing written)' if args.dry_run else ''}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--seed-dir", type=Path, default=SEED_DIR)
+    parser.add_argument("--section", action="append", choices=SECTIONS, help="repeatable; default all nine")
+    parser.add_argument("--title", default="", help="only series whose title contains this text (searched again even if cached)")
+    parser.add_argument("--limit", type=int, default=0, help="only the first N series per section (for a trial run)")
+    parser.add_argument("--refresh", action="store_true", help="re-search series that already have an entry")
+    parser.add_argument("--delay", type=float, default=0.5, help="seconds after every provider call")
+    parser.add_argument("--workers", type=int, default=3, help="series searched at the same time")
+    parser.add_argument("--debug", action="store_true", help="print every query with its result and pack counts")
+    parser.add_argument("--source", choices=("fast", "prowlarr", "all"), default="all",
+                        help="fast = Knaben + normal providers; prowlarr = Prowlarr only (second pass)")
+    parser.add_argument("--add-hindi", action="store_true", help="only look for Hindi packs for series that have none; keeps saved packs")
+    parser.add_argument("--ignore-rest", action="store_true", help="also search series tried within the rest period")
+    parser.add_argument("--dry-run", action="store_true")
+    return asyncio.run(run(parser.parse_args(argv)))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

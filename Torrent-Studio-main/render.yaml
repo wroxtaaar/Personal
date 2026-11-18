@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: torrent-studio
+    runtime: docker
+    repo: https://github.com/wroxtaaar/Torrent-Studio
+    branch: main
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      # Size window for MOVIE torrents on the Prepare card (series are never size-filtered). Uncomment to override search_limits.json
+      # (250 MB .. 2 GB). Decimals are fine; a restart applies it. Cached files have no upper size limit.
+      # - key: TORRENT_MAX_SIZE_GB
+      #   value: "5"
+      # Play HD / Download HD on the movie card: the address of a Torrent Studio that runs the Nuvio add-on (the VPS), e.g.
+      # http://<vps-ip>:3000 . Set it in the Render dashboard (docs/nuvio-streams.md); without it the two buttons do not appear.
+      - key: NUVIO_API_URL
+        sync: false
+      # Use only self-contained section caches; metadata providers are never called at runtime.
+      - key: CACHE_FIRST
+        value: "true"
+      # The container fetches the newest data bundle from the rolling "cache-data" release at start
+      # (see backend/cache-seed/README.md). Set CACHE_BUNDLE_BASE_URL=off to disable.
+      - key: CACHE_ONLY_MODE
+        value: "true"
+      - key: BACKFILL_MISSING_METADATA
+        value: "false"
+      # One or more TMDB read access tokens, separated by commas (a TMDB_API_KEY works too, but
+      # you only need one kind).
+      - key: TMDB_READ_ACCESS_TOKENS
+        sync: false
+      - key: WATCHMODE_API_KEY
+        sync: false
+      # Optional second stream source ("NexStream" in the player). VidRift needs no key.
+      - key: NEXSTREAM_API_KEY
+        sync: false
+      - key: OMDB_API_KEY
+        sync: false
+      - key: SEEDR_API_TOKEN
+        sync: false
+      - key: SEEDR_SESSION_SECRET
+        sync: false
+      - key: ALLOW_LEGACY_SEEDR_TOKEN
+        sync: false
+      - key: GITHUB_FEEDBACK_TOKEN
+        sync: false
+      - key: GITHUB_FEEDBACK_REPO
+        value: wroxtaaar/Torrent-Studio

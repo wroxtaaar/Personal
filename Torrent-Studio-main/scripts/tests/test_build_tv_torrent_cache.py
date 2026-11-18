@@ -1,0 +1,199 @@
+"""TV pack scanner: only season / complete-series packs of the right show are kept."""
+import importlib.util
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("build_tv_torrent_cache", ROOT / "scripts" / "build_tv_torrent_cache.py")
+B = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(B)
+
+
+def cand(title, seeders=10, h="a", size=5 * 1024**3):
+    return {"infoHash": h * 40, "title": title, "seeders": seeders, "leechers": 1, "size": size, "indexer": "X"}
+
+
+def test_classify_packs_and_rejects_episodes_and_other_shows():
+    assert B.classify("Reacher S02 1080p WEB-DL", "Reacher") == ("season", 2)
+    assert B.classify("Reacher.Season.1.Complete.720p", "Reacher") == ("season", 1)        # complete SEASON 1
+    assert B.classify("WandaVision.S01.COMPLETE.2160p.WEB-DL", "WandaVision") == ("season", 1)
+    assert B.classify("Loki.S02.COMPLETE.1080p", "Loki") == ("season", 2)
+    assert B.classify("Reacher Complete Series 1080p", "Reacher") == ("complete", 0)
+    assert B.classify("Reacher S01 S02 S03 1080p", "Reacher") == ("complete", 0)
+    assert B.classify("Reacher S01-S03 2160p", "Reacher") == ("complete", 0)
+    assert B.classify("Reacher Seasons 1-3", "Reacher") == ("complete", 0)
+    assert B.classify("Reacher S02E04 1080p", "Reacher") is None
+    assert B.classify("Reacher 2x04 720p", "Reacher") is None
+    assert B.classify("The Wire S01 1080p", "Reacher") is None
+    assert B.classify("Reacher S01 CAM", "Reacher") is None
+
+
+def test_select_keeps_best_per_season_orders_complete_first_and_dedupes():
+    rows = [cand("Reacher S01 720p", 5, "1"), cand("Reacher S01 1080p", 50, "2"), cand("Reacher S01 2160p", 20, "3"),
+            cand("Reacher S01 480p", 1, "4"), cand("Reacher S02 1080p", 9, "5"),
+            cand("Reacher Complete Series 1080p", 7, "6"), cand("Reacher S02 1080p dup", 9, "5"),
+            cand("Reacher S01E01 1080p", 99, "7"), {"title": "Reacher S03", "seeders": 3}]
+    out = B.select_releases(rows, "Reacher")
+    assert [(r["scope"], r["season"]) for r in out] == [("complete", 0), ("season", 1), ("season", 1), ("season", 1), ("season", 1), ("season", 2)]
+    assert [r["infoHash"][0] for r in out if r["season"] == 1] == ["2", "3", "1", "4"]  # one per resolution, best seeded first
+
+
+def test_entry_omits_season_for_complete_and_merge_keeps_movies():
+    show = {"title": "Reacher", "year": 2022}
+    entry = B.entry_for(show, B.select_releases([cand("Reacher Complete", 5, "1"), cand("Reacher S01", 4, "2")], "Reacher"))
+    assert entry["year"] == 2022 and "season" not in entry["releases"][0] and entry["releases"][1]["season"] == 1
+    existing = {"schemaVersion": 2, "kind": "torrent-options", "section": "x", "trackers": ["t"], "titles": {"movie:1": {"title": "M"}}}
+    merged = B.merge_section(existing, {"tv:9": entry}, "x", "now")
+    assert set(merged["titles"]) == {"movie:1", "tv:9"} and merged["trackers"] == ["t"]
+
+
+def test_tv_rows_only_series_deduped():
+    doc = {"subsections": {"a": {"mediaType": "tv", "results": [{"id": 5, "title": "A"}, {"tmdbId": 5, "title": "A"}]},
+                           "b": {"mediaType": "movie", "results": [{"id": 6, "title": "M"}]}}}
+    assert [r["title"] for r in B.tv_rows(doc)] == ["A"]
+
+
+import asyncio
+
+
+def test_discover_asks_complete_then_each_season_and_stops_after_two_misses():
+    asked = []
+    counter = iter("0123456789abcdef")
+
+    async def searcher(query):
+        asked.append(query)
+        packs = {"Show complete": ["Show Complete Series 1080p"], "Show S01": ["Show S01 1080p"], "Show S02": ["Show S02 720p"],
+                 "Show Season 3": ["Show Season 3 1080p"]}
+        return [cand(t, 5, h=next(counter)) for t in packs.get(query, [])]
+
+    rows = asyncio.run(B.discover("Show", searcher))
+    assert asked == ["Show complete", "Show S01", "Show S02", "Show S03", "Show Season 3", "Show S04", "Show Season 4", "Show S05", "Show Season 5"]
+    kept = B.select_releases(rows, "Show")
+    assert [(r["scope"], r["season"]) for r in kept] == [("complete", 0), ("season", 1), ("season", 2), ("season", 3)]
+
+
+def test_discover_ignores_episodes_and_other_shows_when_counting_misses():
+    async def searcher(query):
+        return [cand("Show S01E01 1080p", 99, "1"), cand("Other S01 1080p", 99, "2")]
+
+    asked = []
+    inner = searcher
+
+    async def spy(query):
+        asked.append(query)
+        return await inner(query)
+
+    asyncio.run(B.discover("Show", spy))
+    assert asked == ["Show complete", "Show S01", "Show Season 1", "Show S02", "Show Season 2"]
+
+
+def test_resolution_variety_beats_raw_seeders():
+    rows = [cand(f"Show S01 720p v{i}", 100 - i, h=f"{i:x}") for i in range(6)] + [
+        cand("Show S01 1080p", 3, "a"), cand("Show S01 2160p", 1, "b")]
+    kept = B.select_releases(rows, "Show", per_bucket=4)
+    assert {B.resolution_of(r["title"]) for r in kept} == {"720p", "1080p", "2160p"}
+    assert len(kept) == 4
+
+
+def test_a_longer_title_is_not_a_pack_of_the_shorter_show():
+    assert B.classify("Wolverine and the X-Men S01 1080p", "Wolverine") is None
+    assert B.classify("Wolverine S01 1080p", "Wolverine") == ("season", 1)
+    assert B.classify("Spider-Man The Animated Series S01 1080p", "Spider-Man") is None
+    assert B.classify("The.Falcon.And.The.Winter.Soldier.S01.COMPLETE.2160p", "The Falcon and the Winter Soldier") == ("season", 1)
+    assert B.classify("Marvels Daredevil S02 1080p BluRay", "Daredevil") == ("season", 2)      # words BEFORE the title are fine
+    assert B.classify("Hawkeye 2021 S01 1080p", "Hawkeye") == ("season", 1)
+    assert B.classify("Loki Complete Series 1080p", "Loki") == ("complete", 0)
+    assert B.classify("Tehran S01 Complete 720p - LOKiHD", "Loki") is None
+
+
+def test_discover_keeps_only_what_each_query_asked_for():
+    async def searcher(query):
+        if query == "Show complete":
+            return [cand("Show S07 1080p", 50, "1"), cand("Show Complete Series 1080p", 5, "2")]   # stray S07 must not be kept
+        if query == "Show S01":
+            return [cand("Show S01 1080p", 9, "3"), cand("Show S03 1080p", 8, "4")]
+        return []
+
+    kept = B.select_releases(asyncio.run(B.discover("Show", searcher)), "Show")
+    assert [(r["scope"], r["season"]) for r in kept] == [("complete", 0), ("season", 1)]
+
+
+def test_a_season_missed_by_its_own_query_is_kept_when_inside_the_found_range():
+    async def searcher(query):
+        if query == "Show complete":
+            return [cand("Show S02 1080p", 9, "1"), cand("Show S09 1080p", 50, "2")]      # S02 inside range, S09 beyond it
+        if query == "Show S01":
+            return [cand("Show S01 1080p", 9, "3")]
+        if query == "Show S03":
+            return [cand("Show S03 1080p", 9, "4")]
+        return []
+
+    kept = B.select_releases(asyncio.run(B.discover("Show", searcher)), "Show")
+    assert [(r["scope"], r["season"]) for r in kept] == [("season", 1), ("season", 2), ("season", 3)]
+
+
+def test_refresh_drops_the_old_entry_of_a_series_that_now_has_no_pack():
+    existing = {"schemaVersion": 2, "section": "x", "trackers": [], "titles": {
+        "movie:1": {"title": "M"}, "tv:7": {"title": "Old"}, "tv:8": {"title": "Kept (not searched)"}}}
+    merged = B.merge_section(existing, {}, "x", "now", replace_keys={"tv:7"})
+    assert set(merged["titles"]) == {"movie:1", "tv:8"}
+
+
+def test_excluded_series_file_matches_real_series_and_is_removed_on_merge(tmp_path):
+    import json as _json
+    excluded = B.load_excluded()
+    assert excluded and all(k.startswith("tv:") and k[3:].isdigit() for k in excluded)
+    known = {}
+    for section in B.SECTIONS:
+        for row in B.tv_rows(_json.loads((B.SEED_DIR / f"{section}.json").read_text(encoding="utf-8"))):
+            known[f"tv:{row.get('tmdbId') or row.get('id')}"] = row["title"]
+    document = _json.loads(B.EXCLUDE_FILE.read_text(encoding="utf-8"))["tmdbIds"]
+    for tmdb, label in document.items():
+        assert known.get(f"tv:{tmdb}"), f"{tmdb} ({label}) is not a series in any section file"
+        assert known[f"tv:{tmdb}"] in label, f"{tmdb}: label {label!r} does not match {known[f'tv:{tmdb}']!r}"
+    existing = {"schemaVersion": 2, "section": "x", "trackers": [], "titles": {"tv:1": {"title": "keep"}, "tv:2": {"title": "drop"}}}
+    merged = B.merge_section(existing, {}, "x", "now", replace_keys={"tv:2"})
+    assert set(merged["titles"]) == {"tv:1"}
+    assert B.load_excluded(tmp_path / "missing.json") == set()
+
+
+def test_year_decides_between_same_name_shows():
+    # The Flash (2014) is the NEWEST of its name: a bare "The Flash S01" means it, a written 1990 does not.
+    assert B.classify("The.Flash.2014.S01.1080p.BluRay", "The Flash", year=2014) == ("season", 1)
+    assert B.classify("The Flash S01 1080p", "The Flash", year=2014) == ("season", 1)
+    assert B.classify("The.Flash.1990.S01.DVDRip", "The Flash", year=2014) is None
+    # The Flash (1990) is an OLDER namesake: it needs its year, a bare name is taken to be the newer show.
+    assert B.classify("The.Flash.1990.S01.DVDRip", "The Flash", year=1990, require_year=True) == ("season", 1)
+    assert B.classify("The Flash S01 1080p", "The Flash", year=1990, require_year=True) is None
+    assert B.classify("The.Flash.2014.S01.1080p", "The Flash", year=1990, require_year=True) is None
+    # one year either side is tolerated; a year after the season describes the season, not the show
+    assert B.classify("Lucifer 2015 S02 1080p", "Lucifer", year=2016) == ("season", 2)
+    assert B.classify("Lucifer 2005 S02 1080p", "Lucifer", year=2016) is None
+    assert B.classify("Reacher S02 2023 1080p", "Reacher", year=2022) == ("season", 2)
+    assert B.classify("Swamp Thing 2019 S01 2160p", "Swamp Thing", year=2019) == ("season", 1)
+    assert B.classify("Swamp Thing 1990 S01", "Swamp Thing", year=2019) is None
+
+
+def test_older_namesakes_are_found_from_the_catalogue():
+    older = B.older_namesakes(B.all_tv_rows(B.SEED_DIR))
+    by_key = {f"tv:{r.get('tmdbId') or r.get('id')}": r for r in B.all_tv_rows(B.SEED_DIR)}
+    flash = {k: r["year"] for k, r in by_key.items() if r["title"] == "The Flash"}
+    swamp = {k: r["year"] for k, r in by_key.items() if r["title"] == "Swamp Thing"}
+    assert {k for k, y in flash.items() if y == 1990} <= older and not {k for k, y in flash.items() if y == 2014} & older
+    assert {k for k, y in swamp.items() if y == 1990} <= older and not {k for k, y in swamp.items() if y == 2019} & older
+    rows = [{"id": 1, "title": "X", "year": 2000}, {"id": 2, "title": "X", "year": 2001}, {"id": 3, "title": "X", "year": 2015}]
+    assert B.older_namesakes(rows) == {"tv:1", "tv:2"}
+    assert B.older_namesakes([{"id": 5, "title": "Solo", "year": 2020}]) == set()
+
+
+def test_older_namesakes_are_searched_with_their_year():
+    asked = []
+
+    async def searcher(query):
+        asked.append(query)
+        return []
+
+    asyncio.run(B.discover("The Flash", searcher, year=1990, require_year=True))
+    assert asked[:2] == ["The Flash 1990 complete", "The Flash 1990 S01"]
+    asked.clear()
+    asyncio.run(B.discover("The Flash", searcher, year=2014))
+    assert asked[:2] == ["The Flash complete", "The Flash S01"]

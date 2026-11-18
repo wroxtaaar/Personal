@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# New pushes supersede older CI/deploy workflows for the same branch.
+concurrency:
+  group: torrent-studio-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.txt
+      - name: Compile check
+        run: python -m compileall -q backend scripts
+      # Catches names that are used but never defined or imported, which is the
+      # main risk when code is moved between modules.
+      - name: Undefined names (ruff)
+        run: |
+          pip install "ruff>=0.9,<1"
+          ruff check --no-cache --select F821,F823 backend scripts
+      - name: Run tests
+        working-directory: backend
+        run: python -m pytest -q tests
+      - name: Run script tests (cache builders and section-cache tools)
+        run: python -m pytest -q scripts/tests
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm install
+      # Every section must render the shared MovieCompactCard / MoviePrepareCard so a
+      # change to a card applies everywhere. Card frames live only in MovieCatalogueCard.
+      - name: Shared card guard
+        run: |
+          if grep -rn "<article" frontend/src --include=*.tsx | grep -v "frontend/src/components/MovieCatalogueCard.tsx"; then
+            echo "::error::Do not hand-write card markup in a section. Use MovieCompactCard / MoviePrepareCard (see MovieCards.tsx)."
+            exit 1
+          fi
+      - name: Type check
+        working-directory: frontend
+        run: npm run lint
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t torrent-studio:ci .
+
+  deploy-vps:
+    name: Deploy to Oracle VPS
+    runs-on: ubuntu-latest
+    # Never allow two VPS deployments for main to run at the same time.
+    concurrency:
+      group: torrent-studio-vps-deploy-${{ github.ref }}
+      cancel-in-progress: true
+    needs: [backend, frontend, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Configure SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          test -n "$VPS_HOST" || { echo "::error::VPS_HOST secret is empty"; exit 1; }
+          test -n "$VPS_SSH_KEY" || { echo "::error::VPS_SSH_KEY secret is empty"; exit 1; }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          port="${VPS_SSH_PORT:-22}"
+          if [ -n "${VPS_SSH_KNOWN_HOSTS:-}" ]; then
+            # Pinned host key (secret VPS_SSH_KNOWN_HOSTS = the output of: ssh-keyscan -p PORT HOST on a trusted network).
+            printf '%s\n' "$VPS_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::VPS_SSH_KNOWN_HOSTS is not set: trusting whatever host key the VPS presents. Add the secret to pin it."
+            ssh-keyscan -p "$port" -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+      - name: Pull and deploy on VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+        run: |
+          set -eu
+          test -n "$VPS_USER" || { echo "::error::VPS_USER secret is empty"; exit 1; }
+          port="${VPS_SSH_PORT:-22}"
+          ssh -i ~/.ssh/id_ed25519 -p "$port" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$VPS_USER@$VPS_HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          APP_DIR="$HOME/Torrent-Studio"
+          if [ ! -d "$APP_DIR/.git" ]; then
+            echo "Expected Git checkout not found at $APP_DIR"
+            echo "Update APP_DIR in .github/workflows/ci.yml to the actual Torrent-Studio checkout path."
+            exit 1
+          fi
+          cd "$APP_DIR"
+          # One fetch, then a fast-forward to exactly that commit. "git pull" fetches again and fails
+          # ("Cannot fast-forward to multiple branches") when another git command on the VPS runs at the same time.
+          for attempt in 1 2 3; do
+            git fetch origin main && git merge --ff-only FETCH_HEAD && break
+            echo "git update failed (attempt $attempt), retrying"; sleep 5
+            [ "$attempt" = 3 ] && exit 1
+          done
+          docker compose up -d --build torrent-studio
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:${HOST_PORT:-3000}/api/health >/dev/null; then
+              echo "Torrent Studio health check passed."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Deployment started, but the health check did not pass within 300 seconds."
+          docker compose ps
+          docker compose logs --tail=100 torrent-studio
+          exit 1
+          REMOTE
