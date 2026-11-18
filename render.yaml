@@ -2,7 +2,7 @@ services:
   - type: web
     name: torrent-studio
     runtime: docker
-    repo: https://github.com/wroxtaaar/Torrent-Studio
+    repo: https://github.com/wroxtaaar/Personal
     branch: main
     plan: free
     region: singapore
