@@ -116,6 +116,21 @@ def _write_version_marker(path: Path, version: str) -> None:
             temporary_path.unlink()
 
 
+def _ensure_regional_modes(seed: Path) -> None:
+    """A bundle built before Korean/Anime had Popular/Trending/Latest/Highest Rated would remove those lists.
+
+    Re-derive whatever is missing from the curated rows (lists that came from a refresh are never touched).
+    Best effort: any problem leaves the installed bundle as it is.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import derive_regional_modes
+
+        derive_regional_modes.main(["--seed", str(seed)])
+    except Exception as exc:
+        print(f"cache bundle: regional modes not derived ({type(exc).__name__}: {exc})")
+
+
 def apply_bundle(seed: Path, base: str) -> str:
     base = base.rstrip("/")
     manifest_url = _with_query(f"{base}/{MANIFEST}", cacheBust=str(time.time_ns()))
@@ -184,6 +199,7 @@ def apply_bundle(seed: Path, base: str) -> str:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(f), str(dest))  # falls back to copy when a rename is not possible
     _write_version_marker(version_path, version)
+    _ensure_regional_modes(seed)
     return (
         f"manifest_version={version} downloaded_sha256={downloaded_sha256} "
         f"installed_version={version} status=installed"

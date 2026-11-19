@@ -17,7 +17,10 @@ The result is only a stand-in until the TMDB-driven refresh (scripts/refresh_see
 lists into the same subsections. A refresh overwrites these; running this script again never overwrites
 a list that came from a refresh (the `derivedFrom` marker is absent) and re-derives from it instead.
 
-    python scripts/derive_regional_modes.py [--seed backend/cache-seed] [--today YYYY-MM-DD] [--check]
+fetch_cache_bundle.py runs this right after it installs a published cache bundle, because a bundle built
+before these lists existed replaces korean.json / anime.json without them.
+
+    python backend/maintenance/derive_regional_modes.py [--seed backend/cache-seed] [--today YYYY-MM-DD] [--check]
 """
 from __future__ import annotations
 
@@ -28,8 +31,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SEED = ROOT / "backend" / "cache-seed"
+ROOT = Path(__file__).resolve().parents[1]  # backend/ in the repo, /app in the image
+DEFAULT_SEED = ROOT / "cache-seed"
 
 # section -> one spec per media type. `sources` are tried in order; the first one that exists and is not
 # itself derived is the curated list. `highest_rated` names the subsection that keeps that curated list
