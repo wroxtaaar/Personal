@@ -20,8 +20,8 @@ _ALL_CATALOGUES = (
     "highest-rated-hollywood", "highest-rated-bollywood",
     "popular-bollywood", "trending-bollywood", "latest-bollywood",
     "popular-hollywood", "trending-hollywood",
-    "popular-korean",
-    "popular-anime",
+    "popular-korean", "trending-korean", "latest-korean",
+    "popular-anime", "trending-anime", "latest-anime",
 )
 # REGIONAL_CACHE_CATALOGUES="popular-hollywood,trending-bollywood" limits a run to those catalogues.
 _ONLY = [c.strip() for c in os.getenv("REGIONAL_CACHE_CATALOGUES", "").split(",") if c.strip()]
@@ -68,7 +68,9 @@ MAX_CANDIDATES = int(os.getenv("REGIONAL_CACHE_MAX_CANDIDATES", "450"))
 ARCHIVE = BASE / "regional_movie_trending_archive.json"
 ORDER = ("highest-rated-hollywood", "highest-rated-bollywood",
           "popular-bollywood", "popular-hollywood", "latest-bollywood",
-          "trending-bollywood", "trending-hollywood", "popular-korean", "popular-anime")
+          "trending-bollywood", "trending-hollywood",
+          "popular-korean", "trending-korean", "latest-korean",
+          "popular-anime", "trending-anime", "latest-anime")
 ORDER = tuple(c for c in ORDER if c in CATALOGUES)  # honours REGIONAL_CACHE_CATALOGUES
 
 # Ordered IMDb source lists are kept in the same manifest consumed by the API.
@@ -432,7 +434,7 @@ def main():
         "hollywood-popular", "hollywood-trending", "hollywood-latest",
         "korean-popular", "korean-trending", "korean-latest",
         "pakistani-popular", "pakistani-trending", "pakistani-latest",
-        "anime-popular",
+        "anime-popular", "anime-trending", "anime-latest",
         "highest-rated-popular",
     )
     if _ONLY:  # a limited (weekly) run rebuilds only the Hollywood/Bollywood series; fixed sections are left alone

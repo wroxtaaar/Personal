@@ -170,6 +170,21 @@ test('Hollywood and Bollywood TV catalogue mappings retain all three subsections
   }
 });
 
+test('Korean and Anime have their own Popular, Trending and Latest subsections for movies and series', async () => {
+  const cacheDirectory = new URL('../../backend/cache-seed/', import.meta.url);
+  for (const group of ['korean', 'anime']) {
+    const document = JSON.parse(await readFile(new URL(`${group}.json`, cacheDirectory), 'utf8'));
+    for (const mode of ['popular', 'trending', 'latest']) {
+      assert.deepEqual(sectionCache.movieCatalogueSection(`${mode}-${group}`), { section: group, subsection: mode });
+      assert.deepEqual(sectionCache.tvCatalogueSection(`${group}-${mode}`), { section: group, subsection: `tv-${mode}` });
+      assert.equal(document.subsections[mode]?.mediaType, 'movie', `${group}/${mode}`);
+      assert.ok(document.subsections[mode].results.length > 0, `${group}/${mode} is empty`);
+      assert.equal(document.subsections[`tv-${mode}`]?.mediaType, 'tv', `${group}/tv-${mode}`);
+      assert.ok(document.subsections[`tv-${mode}`].results.length > 0, `${group}/tv-${mode} is empty`);
+    }
+  }
+});
+
 test('all nine section documents declare consistent 18-record pagination metadata', async () => {
   const sections = [
     'hollywood', 'bollywood', 'marvel', 'dc', 'highest-rated',

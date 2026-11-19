@@ -43,8 +43,12 @@ REGIONAL_MOVIE = {
     "latest-bollywood": ("bollywood", "latest"),
     "highest-rated-hollywood": ("highest-rated", "hollywood"),
     "highest-rated-bollywood": ("highest-rated", "bollywood"),
-    "popular-korean": ("korean", "movies"),
-    "popular-anime": ("anime", "movies"),
+    "popular-korean": ("korean", "popular"),
+    "trending-korean": ("korean", "trending"),
+    "latest-korean": ("korean", "latest"),
+    "popular-anime": ("anime", "popular"),
+    "trending-anime": ("anime", "trending"),
+    "latest-anime": ("anime", "latest"),
 }
 REGIONAL_TV = {
     "highest-rated-popular": ("highest-rated", "tv"),
@@ -54,9 +58,13 @@ REGIONAL_TV = {
     "indian-popular": ("bollywood", "tv-popular"),
     "indian-trending": ("bollywood", "tv-trending"),
     "indian-latest": ("bollywood", "tv-latest"),
-    "korean-popular": ("korean", "series"),
+    "korean-popular": ("korean", "tv-popular"),
+    "korean-trending": ("korean", "tv-trending"),
+    "korean-latest": ("korean", "tv-latest"),
     "pakistani-popular": ("pakistani", "series"),
-    "anime-popular": ("anime", "series"),
+    "anime-popular": ("anime", "tv-popular"),
+    "anime-trending": ("anime", "tv-trending"),
+    "anime-latest": ("anime", "tv-latest"),
 }
 LEGACY_FILES = {
     "latest_bollywood_catalogue.json": ("bollywood", "latest"),
@@ -370,7 +378,7 @@ def main() -> int:
                 fill = [{k: v for k, v in r.items() if k not in ("trendingWeek", "trendingRank")}
                         for r in incoming.get((section, "tv-popular"), [])]
                 rows = merge_rows(incoming[(section, sub)] + earlier, fill, metadata=True)[:MAX_ROLLING]
-            elif ((section in ROLLING_SECTIONS and sub in ROLLING_SUBSECTIONS) or (section, sub) == ("anime", "movies")) and incoming[(section, sub)]:
+            elif ((section in ROLLING_SECTIONS and sub in ROLLING_SUBSECTIONS) or (section, sub) == ("anime", "popular")) and incoming[(section, sub)]:
                 # Newest catalogue first, older rows only fill the gap, never more than MAX_ROLLING (3 pages).
                 # Rows already known keep their enriched fields (ratings, providers).
                 rows = merge_rows(incoming[(section, sub)], previous_rows, metadata=True)[:MAX_ROLLING]
