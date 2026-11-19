@@ -323,7 +323,11 @@ async def _tmdb_fetch_movie_catalogue(catalogue_key: str, page: int, released_on
         "popular-hollywood": ("en", "popular"),
         "trending-hollywood": ("en", "trending"),
         "popular-korean": ("ko", "popular"),
+        "trending-korean": ("ko", "trending"),
+        "latest-korean": ("ko", "latest"),
         "popular-anime": ("ja", "popular"),
+        "trending-anime": ("ja", "trending"),
+        "latest-anime": ("ja", "latest"),
     }
     if catalogue_key in {"marvel", "dc-live-action", "dc-animated"}:
         franchise = "marvel" if catalogue_key == "marvel" else "dc"
@@ -1399,8 +1403,8 @@ async def _api_tmdb_movie_catalogue(
         "marvel", "dc-live-action", "dc-animated",
         "popular-bollywood", "trending-bollywood", "latest-bollywood",
         "popular-hollywood", "trending-hollywood",
-        "popular-korean",
-            "popular-anime",
+        "popular-korean", "trending-korean", "latest-korean",
+        "popular-anime", "trending-anime", "latest-anime",
         "highest-rated-hollywood", "highest-rated-bollywood",
     }
     if catalogue_key not in allowed:

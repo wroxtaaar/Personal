@@ -29,12 +29,12 @@ const MOVIE_CATALOGUE_SECTIONS: Partial<Record<MovieCatalogueKey, SectionCacheLo
   'popular-bollywood': { section: 'bollywood', subsection: 'popular' },
   'trending-hollywood': { section: 'hollywood', subsection: 'trending' },
   'trending-bollywood': { section: 'bollywood', subsection: 'trending' },
-  'popular-korean': { section: 'korean', subsection: 'movies' },
-  'trending-korean': { section: 'korean', subsection: 'movies' },
-  'latest-korean': { section: 'korean', subsection: 'movies' },
-  'popular-anime': { section: 'anime', subsection: 'movies' },
-  'trending-anime': { section: 'anime', subsection: 'movies' },
-  'latest-anime': { section: 'anime', subsection: 'movies' },
+  'popular-korean': { section: 'korean', subsection: 'popular' },
+  'trending-korean': { section: 'korean', subsection: 'trending' },
+  'latest-korean': { section: 'korean', subsection: 'latest' },
+  'popular-anime': { section: 'anime', subsection: 'popular' },
+  'trending-anime': { section: 'anime', subsection: 'trending' },
+  'latest-anime': { section: 'anime', subsection: 'latest' },
 };
 
 const TV_CATALOGUE_SECTIONS: Record<string, SectionCacheLocation> = {
@@ -52,9 +52,13 @@ const TV_CATALOGUE_SECTIONS: Record<string, SectionCacheLocation> = {
   'classics-web-series': { section: 'favourites', subsection: 'series' },
   'classics-anime': { section: 'favourites', subsection: 'anime' },
   'highest-rated-popular': { section: 'highest-rated', subsection: 'tv' },
-  'korean-popular': { section: 'korean', subsection: 'series' },
+  'korean-popular': { section: 'korean', subsection: 'tv-popular' },
+  'korean-trending': { section: 'korean', subsection: 'tv-trending' },
+  'korean-latest': { section: 'korean', subsection: 'tv-latest' },
   'pakistani-popular': { section: 'pakistani', subsection: 'series' },
-  'anime-popular': { section: 'anime', subsection: 'series' },
+  'anime-popular': { section: 'anime', subsection: 'tv-popular' },
+  'anime-trending': { section: 'anime', subsection: 'tv-trending' },
+  'anime-latest': { section: 'anime', subsection: 'tv-latest' },
 };
 
 const FRANCHISE_SECTION_MODES: Record<string, SectionCacheLocation> = {

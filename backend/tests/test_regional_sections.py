@@ -117,8 +117,6 @@ def test_highest_rated_movie_route_keeps_manifest_page_count(monkeypatch):
 
 def test_removed_regional_movie_catalogues_are_not_served():
     removed = (
-        "trending-korean",
-        "latest-korean",
         "popular-pakistani",
     )
     assert not set(removed).intersection(REGIONAL_MOVIE_CATALOGUE_KEYS)
@@ -128,11 +126,24 @@ def test_removed_regional_movie_catalogues_are_not_served():
         assert exc.value.status_code == 404
 
 
-def test_removed_anime_tv_modes_are_not_served():
+def test_korean_and_anime_serve_popular_trending_and_latest_movie_catalogues():
+    for group in ("korean", "anime"):
+        for mode in ("popular", "trending", "latest"):
+            assert f"{mode}-{group}" in REGIONAL_MOVIE_CATALOGUE_KEYS
+
+
+def test_anime_tv_trending_and_latest_are_known_catalogues(monkeypatch):
+    # Unknown keys are rejected with 404 before any TMDB call; these two must get past that check.
+    async def boom(*args, **kwargs):
+        raise RuntimeError("reached TMDB lookup")
+    monkeypatch.setattr(tv, "_tmdb_get_json", boom, raising=False)
     for catalogue_key in ("anime-trending", "anime-latest"):
-        with pytest.raises(HTTPException) as exc:
+        try:
             asyncio.run(tv.api_tmdb_regional_tv_catalogue(catalogue_key, page=1))
-        assert exc.value.status_code == 404
+        except HTTPException as exc:
+            assert exc.status_code != 404, catalogue_key
+        except Exception:
+            pass
 
 
 def test_pakistani_tv_catalogue_uses_fixed_curated_drama_order(monkeypatch, tmp_path):
