@@ -123,7 +123,7 @@ export type MovieCatalogueKey =
   | 'trending-bollywood'
   | 'bollywood-library'
   | 'popular-pakistani' | 'trending-pakistani' | 'latest-pakistani'
-  | 'popular-korean' | 'trending-korean' | 'latest-korean'
+  | 'popular-korean' | 'trending-korean' | 'latest-korean' | 'highest-rated-korean'
   | 'popular-anime' | 'trending-anime' | 'latest-anime';
 
 export interface MovieCatalogueItem {

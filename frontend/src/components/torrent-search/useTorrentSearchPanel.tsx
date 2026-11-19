@@ -286,7 +286,7 @@ export function useTorrentSearchPanel({ seedrFiles, seedrDeletedFolderIds, onPre
     setShowMarvelWebSeries(false);
     setShowDcWebSeries(false);
     const key = (mode + '-' + group) as MovieCatalogueKey;
-    const label = (mode.charAt(0).toUpperCase() + mode.slice(1)) + ' ' + ({ bollywood: 'Bollywood', hollywood: 'Hollywood', korean: 'Korean', pakistani: 'Pakistani', anime: 'Anime' } as Record<RegionalCatalogueGroup, string>)[group];
+    const label = (mode === 'highest-rated' ? 'Highest Rated' : mode.charAt(0).toUpperCase() + mode.slice(1)) + ' ' + ({ bollywood: 'Bollywood', hollywood: 'Hollywood', korean: 'Korean', pakistani: 'Pakistani', anime: 'Anime' } as Record<RegionalCatalogueGroup, string>)[group];
     setRegionalCatalogueModes(previous => ({ ...previous, [group]: mode }));
     setOpenRegionalCatalogueMenu(null);
     setResolutionFilter(null);
@@ -469,7 +469,7 @@ export function useTorrentSearchPanel({ seedrFiles, seedrDeletedFolderIds, onPre
 
       // Regional catalogues (Hollywood/Bollywood) paint the stored rows first, exactly like the
       // Marvel/DC pages, and the enriched page replaces them a moment later.
-      const isRegionalCatalogue = /^(popular|trending|latest)-(bollywood|hollywood|korean|pakistani|anime)$/.test(String(key));
+      const isRegionalCatalogue = /^((popular|trending|latest)-(bollywood|hollywood|korean|pakistani|anime)|highest-rated-korean)$/.test(String(key));
       if (page > 3 || isRegionalCatalogue) {
         // Deep pages paint quickly with source metadata and lightweight posters.
         // The full eligibility/provider/details response replaces this in the background.

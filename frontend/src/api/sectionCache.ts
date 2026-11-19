@@ -32,6 +32,7 @@ const MOVIE_CATALOGUE_SECTIONS: Partial<Record<MovieCatalogueKey, SectionCacheLo
   'popular-korean': { section: 'korean', subsection: 'popular' },
   'trending-korean': { section: 'korean', subsection: 'trending' },
   'latest-korean': { section: 'korean', subsection: 'latest' },
+  'highest-rated-korean': { section: 'korean', subsection: 'highest-rated' },
   'popular-anime': { section: 'anime', subsection: 'popular' },
   'trending-anime': { section: 'anime', subsection: 'trending' },
   'latest-anime': { section: 'anime', subsection: 'latest' },
@@ -59,6 +60,7 @@ const TV_CATALOGUE_SECTIONS: Record<string, SectionCacheLocation> = {
   'anime-popular': { section: 'anime', subsection: 'tv-popular' },
   'anime-trending': { section: 'anime', subsection: 'tv-trending' },
   'anime-latest': { section: 'anime', subsection: 'tv-latest' },
+  'anime-highest-rated': { section: 'anime', subsection: 'tv-highest-rated' },
 };
 
 const FRANCHISE_SECTION_MODES: Record<string, SectionCacheLocation> = {

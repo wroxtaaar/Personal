@@ -185,6 +185,16 @@ test('Korean and Anime have their own Popular, Trending and Latest subsections f
   }
 });
 
+test('Korean movies and Anime series expose a Highest Rated list', async () => {
+  assert.deepEqual(sectionCache.movieCatalogueSection('highest-rated-korean'), { section: 'korean', subsection: 'highest-rated' });
+  assert.deepEqual(sectionCache.tvCatalogueSection('anime-highest-rated'), { section: 'anime', subsection: 'tv-highest-rated' });
+  const cacheDirectory = new URL('../../backend/cache-seed/', import.meta.url);
+  const korean = JSON.parse(await readFile(new URL('korean.json', cacheDirectory), 'utf8'));
+  const anime = JSON.parse(await readFile(new URL('anime.json', cacheDirectory), 'utf8'));
+  assert.equal(korean.subsections['highest-rated']?.mediaType, 'movie');
+  assert.equal(anime.subsections['tv-highest-rated']?.mediaType, 'tv');
+});
+
 test('all nine section documents declare consistent 18-record pagination metadata', async () => {
   const sections = [
     'hollywood', 'bollywood', 'marvel', 'dc', 'highest-rated',

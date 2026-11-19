@@ -43,7 +43,8 @@ REGIONAL_MOVIE = {
     "latest-bollywood": ("bollywood", "latest"),
     "highest-rated-hollywood": ("highest-rated", "hollywood"),
     "highest-rated-bollywood": ("highest-rated", "bollywood"),
-    "popular-korean": ("korean", "popular"),
+    # the curated IMDb-ordered Korean movie list is shown as Highest Rated; Popular is derived from it
+    "popular-korean": ("korean", "highest-rated"),
     "trending-korean": ("korean", "trending"),
     "latest-korean": ("korean", "latest"),
     "popular-anime": ("anime", "popular"),
@@ -62,7 +63,8 @@ REGIONAL_TV = {
     "korean-trending": ("korean", "tv-trending"),
     "korean-latest": ("korean", "tv-latest"),
     "pakistani-popular": ("pakistani", "series"),
-    "anime-popular": ("anime", "tv-popular"),
+    # the curated anime series list is shown as Highest Rated; Popular is derived from it
+    "anime-popular": ("anime", "tv-highest-rated"),
     "anime-trending": ("anime", "tv-trending"),
     "anime-latest": ("anime", "tv-latest"),
 }

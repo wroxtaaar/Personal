@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Give the Korean and Anime section caches the same Popular / Trending / Latest lists as Hollywood and Bollywood.
+"""Give the Korean and Anime section caches the same lists as Hollywood and Bollywood.
 
 Those two sections store each list as its own subsection (movies: popular, trending, latest;
 series: tv-popular, tv-trending, tv-latest). Korean and Anime only had one `movies` and one `series`
 list. This script derives the missing lists from the rows already stored, offline and without TMDB:
 
-    popular   the existing curated order (unchanged)
-    trending  recent popularity: IMDb votes divided by (1 + age in years), so newer titles with a big
-              audience rise above old classics (falls back to the TMDB rating when votes are unknown)
-    latest    released titles only, newest release date first
+    highest-rated   Korean movies and Anime series only: the existing curated list, unchanged
+                    (subsection `highest-rated` / `tv-highest-rated`)
+    popular         those two: the curated list re-ordered by IMDb votes (audience size);
+                    Korean series and Anime movies: the existing curated order, unchanged
+    trending        recent popularity: IMDb votes divided by (1 + age in years), so newer titles with a big
+                    audience rise above old classics (falls back to the TMDB rating when votes are unknown)
+    latest          released titles only, newest release date first
 
 The result is only a stand-in until the TMDB-driven refresh (scripts/refresh_seed.py) writes real
-trending/latest lists into the same subsections. A refresh overwrites these; running this script again
-never overwrites a list that came from TMDB (its `derivedFrom` marker is absent).
+lists into the same subsections. A refresh overwrites these; running this script again never overwrites
+a list that came from a refresh (the `derivedFrom` marker is absent) and re-derives from it instead.
 
     python scripts/derive_regional_modes.py [--seed backend/cache-seed] [--today YYYY-MM-DD] [--check]
 """
@@ -28,10 +31,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SEED = ROOT / "backend" / "cache-seed"
 
-# section -> (source subsection, derived subsection prefix, media type)
-SOURCES = {
-    "korean": (("movies", "", "movie"), ("series", "tv-", "tv")),
-    "anime": (("movies", "", "movie"), ("series", "tv-", "tv")),
+# section -> one spec per media type. `sources` are tried in order; the first one that exists and is not
+# itself derived is the curated list. `highest_rated` names the subsection that keeps that curated list
+# (None = this list is not shown as Highest Rated).
+SPECS = {
+    "korean": (
+        {"media": "movie", "prefix": "", "sources": ("highest-rated", "movies"), "highest_rated": "highest-rated"},
+        {"media": "tv", "prefix": "tv-", "sources": ("tv-popular", "series"), "highest_rated": None},
+    ),
+    "anime": (
+        {"media": "movie", "prefix": "", "sources": ("popular", "movies"), "highest_rated": None},
+        {"media": "tv", "prefix": "tv-", "sources": ("tv-highest-rated", "series"), "highest_rated": "tv-highest-rated"},
+    ),
 }
 MODES = ("popular", "trending", "latest")
 MARKER = "derivedFrom"
@@ -59,8 +70,10 @@ def trending_score(row: dict, today: date) -> float:
     return weight / (1.0 + age_years)
 
 
-def ordered(rows: list[dict], mode: str, today: date) -> list[dict]:
+def ordered(rows: list[dict], mode: str, today: date, popular_by_votes: bool = False) -> list[dict]:
     if mode == "popular":
+        if popular_by_votes:
+            return sorted(rows, key=lambda r: parse_votes(r.get("imdbVotes")), reverse=True)
         return list(rows)
     if mode == "latest":
         released = [r for r in rows if (parse_date(r.get("releaseDate")) or date.max) <= today]
@@ -87,23 +100,40 @@ def build_subsection(source: dict, rows: list[dict], key: str, source_name: str)
     return subsection
 
 
+def pick_source(subsections: dict, names: tuple[str, ...]) -> str | None:
+    for name in names:
+        entry = subsections.get(name)
+        if isinstance(entry, dict) and entry.get("results") and MARKER not in entry:
+            return name
+    return None
+
+
 def derive_document(document: dict, section: str, today: date) -> list[str]:
     """Add the derived subsections in place; return what was written."""
     written: list[str] = []
     subsections = document.setdefault("subsections", {})
-    for source_name, prefix, media_type in SOURCES[section]:
-        source = subsections.get(source_name)
-        if not isinstance(source, dict) or not isinstance(source.get("results"), list):
+    for spec in SPECS[section]:
+        prefix, media_type, highest_rated = spec["prefix"], spec["media"], spec["highest_rated"]
+        source_name = pick_source(subsections, spec["sources"])
+        if source_name is None:
             continue
+        source = subsections[source_name]
+        rows = source["results"]
+        if highest_rated and source_name != highest_rated:
+            subsections[highest_rated] = build_subsection(source, rows, highest_rated, source_name)
+            subsections[highest_rated]["mediaType"] = media_type
+            written.append(f"{section}.{highest_rated} ({len(rows)} rows)")
         for mode in MODES:
             name = f"{prefix}{mode}"
+            if name == source_name:
+                continue  # real data from the refresh pipeline: leave it alone
             existing = subsections.get(name)
             if isinstance(existing, dict) and MARKER not in existing and existing.get("results"):
-                continue  # real data from the refresh pipeline: leave it alone
-            rows = ordered(source["results"], mode, today)
-            subsections[name] = build_subsection(source, rows, name, source_name)
+                continue
+            ordered_rows = ordered(rows, mode, today, popular_by_votes=bool(highest_rated))
+            subsections[name] = build_subsection(source, ordered_rows, name, source_name)
             subsections[name]["mediaType"] = media_type
-            written.append(f"{section}.{name} ({len(rows)} rows)")
+            written.append(f"{section}.{name} ({len(ordered_rows)} rows)")
     return written
 
 
@@ -115,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     changed = 0
-    for section in SOURCES:
+    for section in SPECS:
         path = args.seed / f"{section}.json"
         document = json.loads(path.read_text(encoding="utf-8"))
         written = derive_document(document, section, args.today)

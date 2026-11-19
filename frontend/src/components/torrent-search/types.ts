@@ -14,10 +14,10 @@ export type ClassicsContentTab = 'movies' | 'web-series' | 'anime';
 
 export type RegionalCatalogueGroup = 'bollywood' | 'hollywood' | 'korean' | 'pakistani' | 'anime';
 
-export type RegionalCatalogueMode = 'popular' | 'trending' | 'latest';
+export type RegionalCatalogueMode = 'popular' | 'trending' | 'latest' | 'highest-rated';
 
 export type RegionalTvGroup = 'indian' | 'hollywood' | 'korean' | 'pakistani' | 'anime' | 'highest-rated';
 
-export type RegionalTvMode = 'popular' | 'trending' | 'latest';
+export type RegionalTvMode = 'popular' | 'trending' | 'latest' | 'highest-rated';
 
 export type MarvelFilmFilter = 'all' | 'mcu' | 'x-men' | 'sony';
